@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 /**
  * Crypto MCP Server
  * Tento server poskytuje nástroje pro získávání aktuálních cen kryptoměn
@@ -12,49 +10,68 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import axios from 'axios';
+import { z } from 'zod';
 
-// Definice rozhraní (interface) pro odpověď z CoinGecko API
-interface CoinGeckoResponse {
-  bitcoin: {
-    usd: number;
-    eur: number;
-    czk: number;
-  };
-}
-
-// Definice rozhraní pro náš výsledek
-interface BitcoinPrice {
-  currency: string;
-  price: number;
-  timestamp: string;
-}
+// Import našich typů a schémat
+import {
+  CryptoSchema,
+  CurrencySchema,
+  GetCryptoPriceInputSchema,
+  type Crypto,
+  type Currency,
+  type GetCryptoPriceInput,
+  type CoinGeckoResponse,
+  type CryptoPrice,
+  getCryptoInfo,
+  getSupportedCryptos,
+  getUniqueCoinGeckoIds
+} from './types';
 
 /**
- * Funkce pro získání aktuální ceny Bitcoinu
+ * Funkce pro získání aktuální ceny kryptoměny
+ * @param crypto - název kryptoměny (bitcoin, ethereum, atd.)
  * @param currency - měna (usd, eur, czk)
- * @returns Promise s cenou Bitcoinu
+ * @returns Promise s cenou kryptoměny
  */
-async function getBitcoinPrice(currency: string = 'usd'): Promise<BitcoinPrice> {
+async function getCryptoPrice(crypto: string = 'bitcoin', currency: string = 'usd'): Promise<CryptoPrice> {
   try {
+    // Validace vstupních parametrů pomocí Zod
+    const validatedInput = GetCryptoPriceInputSchema.parse({
+      crypto: crypto.toLowerCase(),
+      currency: currency.toLowerCase()
+    });
+
+    // Získání informací o kryptoměně
+    const cryptoInfo = getCryptoInfo(validatedInput.crypto);
+
     // Volání CoinGecko API
     const response = await axios.get<CoinGeckoResponse>(
-      'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,eur,czk'
+      `https://api.coingecko.com/api/v3/simple/price?ids=${cryptoInfo.id}&vs_currencies=usd,eur,czk`
     );
 
     // Kontrola, zda máme platnou odpověď
-    if (!response.data.bitcoin || !response.data.bitcoin[currency as keyof typeof response.data.bitcoin]) {
+    const cryptoData = response.data[cryptoInfo.id];
+    if (!cryptoData || !cryptoData[validatedInput.currency as keyof typeof cryptoData]) {
       throw new Error(`Nepodporovaná měna: ${currency}`);
     }
 
     // Vrácení strukturovaných dat
     return {
-      currency: currency.toUpperCase(),
-      price: response.data.bitcoin[currency as keyof typeof response.data.bitcoin],
+      cryptoName: cryptoInfo.name,
+      cryptoSymbol: cryptoInfo.symbol,
+      currency: validatedInput.currency.toUpperCase(),
+      price: cryptoData[validatedInput.currency as keyof typeof cryptoData],
       timestamp: new Date().toISOString()
     };
   } catch (error) {
-    // Pokud nastane chyba, vyhodíme ji dál
-    throw new Error(`Chyba při získávání ceny Bitcoinu: ${error}`);
+    // Pokud jde o Zod validační chybu
+    if (error instanceof z.ZodError) {
+      const issues = error.issues.map(issue => issue.message).join(', ');
+      throw new Error(`Neplatné parametry: ${issues}. Podporované kryptoměny: ${getSupportedCryptos()}`);
+    }
+
+    // Pokud nastane jiná chyba, vyhodíme ji dál
+    throw new Error(`Chyba při získávání ceny kryptoměny: ${error}`);
   }
 }
 
@@ -80,15 +97,21 @@ async function main() {
     return {
       tools: [
         {
-          name: 'get_bitcoin_price',
-          description: 'Získá aktuální cenu Bitcoinu v zadané měně',
+          name: 'get_crypto_price',
+          description: 'Získá aktuální cenu kryptoměny v zadané měně',
           inputSchema: {
             type: 'object',
             properties: {
+              crypto: {
+                type: 'string',
+                description: 'Kryptoměna (bitcoin, btc, ethereum, eth)',
+                enum: [...CryptoSchema.options], // Dynamicky z Zod schématu
+                default: 'bitcoin'
+              },
               currency: {
                 type: 'string',
                 description: 'Měna (usd, eur, czk)',
-                enum: ['usd', 'eur', 'czk'],
+                enum: [...CurrencySchema.options], // Dynamicky z Zod schématu
                 default: 'usd'
               }
             },
@@ -104,19 +127,20 @@ async function main() {
     const { name, arguments: args } = request.params;
 
     switch (name) {
-      case 'get_bitcoin_price': {
+      case 'get_crypto_price': {
         try {
-          // Získání měny z argumentů (výchozí je 'usd')
+          // Získání parametrů z argumentů
+          const crypto = (args?.crypto as string) || 'bitcoin';
           const currency = (args?.currency as string) || 'usd';
-          
+
           // Volání naší funkce
-          const priceData = await getBitcoinPrice(currency);
-          
+          const priceData = await getCryptoPrice(crypto, currency);
+
           return {
             content: [
               {
                 type: 'text',
-                text: `💰 Aktuální cena Bitcoinu: ${priceData.price.toLocaleString('cs-CZ')} ${priceData.currency}\n⏰ Čas: ${new Date(priceData.timestamp).toLocaleString('cs-CZ')}`
+                text: `🪙 ${priceData.cryptoName} (${priceData.cryptoSymbol}): ${priceData.price.toLocaleString('cs-CZ')} ${priceData.currency}\n⏰ Čas: ${new Date(priceData.timestamp).toLocaleString('cs-CZ')}`
               }
             ]
           };
@@ -141,8 +165,10 @@ async function main() {
   // Spuštění serveru
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  
+
   console.error('🚀 Crypto MCP Server je spuštěn!');
+  console.error(`📊 Podporované kryptoměny: ${getSupportedCryptos()}`);
+  console.error(`💰 Podporované měny: ${CurrencySchema.options.join(', ')}`);
 }
 
 // Spuštění hlavní funkce
