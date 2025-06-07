@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "crypto-server": {
+      "command": "node",
+      "args": ["dist/index.js"],
+      "cwd": "."
+    }
+  }
+} 
